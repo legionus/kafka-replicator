@@ -1,0 +1,16 @@
+Source: kafka-replicator
+Section: utils
+Priority: extra
+Maintainer: Gladkov Alexey <legion@yandex-team.ru>
+Build-Depends:
+ debhelper (>= 8.0.0),
+ golang (>= 1.4.2)
+Standards-Version: 3.9.3
+Homepage: https://github.com/legionus/kafka-replicator
+
+Package: kafka-replicator
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends},
+  logrotate
+Description: Kafka messages replicator
+  Server move messages from one Apache Kafka to another.

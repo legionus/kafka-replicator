@@ -1,0 +1,17 @@
+description "Kafka messages replicator"
+
+respawn
+
+start on runlevel [2345]
+stop on runlevel [!2345]
+
+script
+    BIN_DIR=/usr/sbin
+    SYSCONF_DIR=/etc
+
+    [ ! -s /etc/default/khp ] || . /etc/default/khp
+
+    ulimit -n 655350
+
+    exec "$BIN_DIR/kafka-replicator" -config="$SYSCONF_DIR/kafka-replicator.cfg"
+end script

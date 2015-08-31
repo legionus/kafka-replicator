@@ -1,0 +1,11 @@
+/var/log/kafka-replicator.log {
+    daily
+    rotate 10
+    notifempty
+    missingok
+    compress
+    delaycompress
+    postrotate
+        /bin/kill -HUP `cat /run/kafka-replicator.pid 2>/dev/null` 2> /dev/null || true
+    endscript
+}
