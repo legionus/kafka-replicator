@@ -3,7 +3,7 @@ package main
 import (
 	log "github.com/Sirupsen/logrus"
 	"github.com/optiopay/kafka"
-	"github.com/scalingdata/gcfg"
+	"github.com/BurntSushi/toml"
 
 	"bytes"
 	"crypto/tls"
@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"time"
 	"net/http"
-	"os"
 	"runtime"
 	"sync"
 )
@@ -113,11 +112,11 @@ type Server struct {
 
 func (s *Server) run() error {
 	brokerConf := kafka.NewBrokerConf("kafka-replicator")
-	brokerConf.DialTimeout = s.Cfg.Broker.DialTimeout.Duration
-	brokerConf.LeaderRetryLimit = s.Cfg.Broker.LeaderRetryLimit
-	brokerConf.LeaderRetryWait = s.Cfg.Broker.LeaderRetryWait.Duration
+	brokerConf.DialTimeout = s.Cfg.Kafka.DialTimeout.Duration
+	brokerConf.LeaderRetryLimit = s.Cfg.Kafka.LeaderRetryLimit
+	brokerConf.LeaderRetryWait = s.Cfg.Kafka.LeaderRetryWait.Duration
 
-	broker, err := kafka.Dial(s.Cfg.Kafka.Broker, brokerConf)
+	broker, err := kafka.Dial(s.Cfg.Kafka.Brokers, brokerConf)
 	if err != nil {
 		s.Log.Fatal("Unable to connect to kafka", "err", err)
 	}
@@ -213,13 +212,11 @@ func main() {
 		*config = "/etc/kafka-replicator.cfg"
 	}
 
-	cfg := &Config{}
+	cfg := Config{}
 	cfg.SetDefaults()
 
-	err := gcfg.ReadFileInto(cfg, *config)
-	if err != nil {
-		fmt.Println("Bad config:", err.Error())
-		os.Exit(1)
+	if _, err := toml.DecodeFile(*config, &cfg); err != nil {
+		log.Fatal(err)
 	}
 
 	log.SetLevel(cfg.Logging.Level.Level)
@@ -259,11 +256,11 @@ func main() {
 	statefile := NewState(cfg.State.File)
 
 	server := &Server{
-		Cfg:     cfg,
+		Cfg:     &cfg,
 		Log:     &serverLogger{
 			subsys: "server",
 		},
-		Offsets: statefile.Load(cfg.Kafka.Topic),
+		Offsets: statefile.Load(cfg.Kafka.Topics),
 	}
 
 	go func() {

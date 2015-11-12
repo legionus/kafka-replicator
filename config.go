@@ -34,48 +34,57 @@ func (d *CfgDuration) UnmarshalText(data []byte) (err error) {
 	return
 }
 
+type ConfigGlobal struct {
+	Address string
+	Logfile    string
+	Pidfile    string
+	GoMaxProcs int
+}
+
+type ConfigLogging struct {
+	Level            CfgLogLevel
+	DisableColors    bool
+	DisableTimestamp bool
+	FullTimestamp    bool
+	DisableSorting   bool
+}
+
+type ConfigKafka struct {
+	Brokers          []string
+	Topics           []string
+	DialTimeout      CfgDuration
+	LeaderRetryLimit int
+	LeaderRetryWait  CfgDuration
+}
+
+type ConfigConsumer struct {
+	RequestTimeout   CfgDuration
+	RetryLimit       int
+	RetryWait        CfgDuration
+	RetryErrLimit    int
+	RetryErrWait     CfgDuration
+	MinFetchSize     int32
+	MaxFetchSize     int32
+	DefaultFetchSize int32
+}
+
+type ConfigState struct {
+	Period CfgDuration
+	File   string
+}
+
+type ConfigEndpoint struct {
+	URL string
+}
+
 // Config is a main config structure
 type Config struct {
-	Global struct {
-		Logfile    string
-		Pidfile    string
-		GoMaxProcs int
-	}
-	Kafka struct {
-		Broker []string
-		Topic  []string
-	}
-	State struct {
-		Period CfgDuration
-		File   string
-	}
-	Endpoint struct {
-		URL     string
-	}
-	Broker struct {
-		NumConns         int64
-		DialTimeout      CfgDuration
-		LeaderRetryLimit int
-		LeaderRetryWait  CfgDuration
-		ReconnectTimeout CfgDuration
-	}
-	Consumer struct {
-		RequestTimeout   CfgDuration
-		RetryLimit       int
-		RetryWait        CfgDuration
-		RetryErrLimit    int
-		RetryErrWait     CfgDuration
-		MinFetchSize     int32
-		MaxFetchSize     int32
-		DefaultFetchSize int32
-	}
-	Logging struct {
-		Level            CfgLogLevel
-		DisableColors    bool
-		DisableTimestamp bool
-		FullTimestamp    bool
-		DisableSorting   bool
-	}
+	Global   ConfigGlobal
+	Logging  ConfigLogging
+	Kafka    ConfigKafka
+	State    ConfigState
+	Endpoint ConfigEndpoint
+	Consumer ConfigConsumer
 }
 
 // SetDefaults applies default values to config structure.
@@ -87,10 +96,9 @@ func (c *Config) SetDefaults() {
 	c.State.Period.Duration = 3 * time.Second
 	c.State.File = "/tmp/kafka-replicator.state"
 
-	c.Broker.DialTimeout.Duration = 500 * time.Millisecond
-	c.Broker.LeaderRetryLimit = 2
-	c.Broker.LeaderRetryWait.Duration = 500 * time.Millisecond
-	c.Broker.ReconnectTimeout.Duration = 15 * time.Second
+	c.Kafka.DialTimeout.Duration = 500 * time.Millisecond
+	c.Kafka.LeaderRetryLimit = 2
+	c.Kafka.LeaderRetryWait.Duration = 500 * time.Millisecond
 
 	c.Consumer.RequestTimeout.Duration = 50 * time.Millisecond
 	c.Consumer.RetryLimit = 2
