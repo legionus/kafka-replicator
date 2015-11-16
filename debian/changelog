@@ -1,3 +1,9 @@
+kafka-replicator (210) unstable; urgency=low
+
+  * Remove obsolete config options.
+
+ -- Gladkov Alexey <gladkov.alexey@gmail.com>  Mon, 16 Nov 2015 17:38:24 +0300
+
 kafka-replicator (200) unstable; urgency=low
 
   * Use OffsetCoordinator instead of file to store processed offsets.
