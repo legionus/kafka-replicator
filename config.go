@@ -35,7 +35,6 @@ func (d *CfgDuration) UnmarshalText(data []byte) (err error) {
 }
 
 type ConfigGlobal struct {
-	Address string
 	Logfile string
 	Pidfile string
 }
@@ -73,11 +72,6 @@ type ConfigConsumer struct {
 	DefaultFetchSize int32
 }
 
-type ConfigState struct {
-	Period CfgDuration
-	File   string
-}
-
 type ConfigEndpoint struct {
 	URL string
 }
@@ -88,7 +82,6 @@ type Config struct {
 	Logging   ConfigLogging
 	Kafka     ConfigKafka
 	Zookeeper ConfigZookeeper
-	State     ConfigState
 	Endpoint  ConfigEndpoint
 	Consumer  ConfigConsumer
 }
@@ -97,9 +90,6 @@ type Config struct {
 func (c *Config) SetDefaults() {
 	c.Global.Logfile = "/var/log/kafka-replicator.log"
 	c.Global.Pidfile = "/run/kafka-replicator.pid"
-
-	c.State.Period.Duration = 3 * time.Second
-	c.State.File = "/tmp/kafka-replicator.state"
 
 	c.Kafka.DialTimeout.Duration = 500 * time.Millisecond
 	c.Kafka.LeaderRetryLimit = 2
