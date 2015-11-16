@@ -1,3 +1,11 @@
+kafka-replicator (200) unstable; urgency=low
+
+  * Use OffsetCoordinator instead of file to store processed offsets.
+  * Use Zookeeper for the distribution of partitions between processes.
+  * Use TOML as config file language.
+
+ -- Gladkov Alexey <gladkov.alexey@gmail.com>  Mon, 16 Nov 2015 17:10:15 +0300
+
 kafka-replicator (100) unstable; urgency=low
 
   * Initial Release.
