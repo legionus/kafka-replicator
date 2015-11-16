@@ -1,84 +1,28 @@
 package main
 
 import (
-	log "github.com/Sirupsen/logrus"
-	"github.com/optiopay/kafka"
 	"github.com/BurntSushi/toml"
+	"github.com/Sirupsen/logrus"
+	"github.com/optiopay/kafka"
+	"github.com/optiopay/kafka/proto"
+	"github.com/samuel/go-zookeeper/zk"
+	"github.com/satori/go.uuid"
 
 	"bytes"
 	"crypto/tls"
 	"encoding/json"
 	"flag"
-	"fmt"
-	"time"
+	"math"
 	"net/http"
-	"runtime"
-	"sync"
+	"strconv"
+	"strings"
+	"time"
 )
 
 var (
 	addr   = flag.String("addr", "", "The address to bind to")
 	config = flag.String("config", "", "Path to configuration file")
 )
-
-type serverLogger struct {
-	subsys string
-}
-
-func (l *serverLogger) Debug(msg string, args ...interface{}) {
-	e := log.NewEntry(log.StandardLogger())
-
-	for i := 0; i < len(args); i += 2 {
-		k := fmt.Sprintf("%+v", args[i])
-		e = e.WithField(k, args[i+1])
-	}
-
-	e.Debugf("[%s] %s", l.subsys, msg)
-}
-
-func (l *serverLogger) Info(msg string, args ...interface{}) {
-	e := log.NewEntry(log.StandardLogger())
-
-	for i := 0; i < len(args); i += 2 {
-		k := fmt.Sprintf("%+v", args[i])
-		e = e.WithField(k, args[i+1])
-	}
-
-	e.Infof("[%s] %s", l.subsys, msg)
-}
-
-func (l *serverLogger) Warn(msg string, args ...interface{}) {
-	e := log.NewEntry(log.StandardLogger())
-
-	for i := 0; i < len(args); i += 2 {
-		k := fmt.Sprintf("%+v", args[i])
-		e = e.WithField(k, args[i+1])
-	}
-
-	e.Warningf("[%s] %s", l.subsys, msg)
-}
-
-func (l *serverLogger) Error(msg string, args ...interface{}) {
-	e := log.NewEntry(log.StandardLogger())
-
-	for i := 0; i < len(args); i += 2 {
-		k := fmt.Sprintf("%+v", args[i])
-		e = e.WithField(k, args[i+1])
-	}
-
-	e.Errorf("[%s] %s", l.subsys, msg)
-}
-
-func (l *serverLogger) Fatal(msg string, args ...interface{}) {
-	e := log.NewEntry(log.StandardLogger())
-
-	for i := 0; i < len(args); i += 2 {
-		k := fmt.Sprintf("%+v", args[i])
-		e = e.WithField(k, args[i+1])
-	}
-
-	e.Fatalf("[%s] %s", l.subsys, msg)
-}
 
 type senderInfo struct {
 	Project string
@@ -98,111 +42,41 @@ type partitionKey struct {
 	Partition int32
 }
 
-type lastOffsets struct {
-	sync.RWMutex
-	Last map[partitionKey]int64
-}
-
-// Server is a main structure.
-type Server struct {
-	Cfg     *Config
-	Log     *serverLogger
-	Offsets *lastOffsets
-}
-
-func (s *Server) run() error {
-	brokerConf := kafka.NewBrokerConf("kafka-replicator")
-	brokerConf.DialTimeout = s.Cfg.Kafka.DialTimeout.Duration
-	brokerConf.LeaderRetryLimit = s.Cfg.Kafka.LeaderRetryLimit
-	brokerConf.LeaderRetryWait = s.Cfg.Kafka.LeaderRetryWait.Duration
-
-	broker, err := kafka.Dial(s.Cfg.Kafka.Brokers, brokerConf)
+func toInt32(s string) int32 {
+	if s == "" {
+		return 0
+	}
+	i, err := strconv.ParseInt(s, 10, 32)
 	if err != nil {
-		s.Log.Fatal("Unable to connect to kafka", "err", err)
+		return 0
 	}
-	defer broker.Close()
+	return int32(i)
+}
 
-	transCfg := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // ignore expired SSL certificates
-	}
+func OffsetInit(topics []string) (offsets map[partitionKey]int) {
+	offsets = make(map[partitionKey]int)
 
-	client := &http.Client{
-		Transport: transCfg,
-	}
-
-	for {
-		var fetchers []kafka.Consumer
-
-		s.Offsets.Lock()
-		for k, offset := range s.Offsets.Last {
-			conf := kafka.NewConsumerConf(k.Topic, k.Partition)
-
-			conf.RequestTimeout = s.Cfg.Consumer.RequestTimeout.Duration
-			conf.RetryLimit = s.Cfg.Consumer.RetryLimit
-			conf.RetryWait = s.Cfg.Consumer.RetryWait.Duration
-			conf.RetryErrLimit = s.Cfg.Consumer.RetryErrLimit
-			conf.RetryErrWait = s.Cfg.Consumer.RetryErrWait.Duration
-			conf.MinFetchSize = s.Cfg.Consumer.MinFetchSize
-			conf.MaxFetchSize = s.Cfg.Consumer.MaxFetchSize
-
-			conf.StartOffset = offset
-
-			consumer, err := broker.Consumer(conf)
-			if err != nil {
-				s.Log.Fatal("Unable make consumer", "err", err)
-			}
-
-			fetchers = append(fetchers, consumer)
+	for _, topic := range topics {
+		topicInfo := strings.SplitN(topic, ":", 2)
+		if len(topicInfo) != 2 {
+			logrus.Fatal("Wrong topics definition:", topic)
 		}
-		s.Offsets.Unlock()
 
-		mx := kafka.Merge(fetchers...)
+		numPartitions := toInt32(topicInfo[1])
+		if numPartitions == 0 {
+			logrus.Fatal("Wrong number of partitions:", topicInfo[1])
+		}
 
-		for {
-			msg, err := mx.Consume()
-			if err != nil {
-				s.Log.Error("Unable to consume", "err", err)
-				break
-			}
-
+		for i := int32(0); i < numPartitions; i++ {
 			key := partitionKey{
-				Topic:     msg.Topic,
-				Partition: msg.Partition,
+				Topic:     topicInfo[0],
+				Partition: i,
 			}
-
-			s.Log.Info("Received message",
-				"topic", msg.Topic,
-				"partition", msg.Partition,
-				"offset", msg.Offset,
-			)
-
-			var m kafkaMessage
-			if err := json.Unmarshal(msg.Value, &m); err != nil {
-				s.Log.Error("Unable to parse message", "err", err)
-				continue
-			}
-
-			var endpointURL = s.Cfg.Endpoint.URL+"?queue="+msg.Topic
-			for {
-				resp, err := client.Post(
-					endpointURL,
-					"application/json",
-					bytes.NewReader(m.Data),
-				)
-				if err == nil {
-					resp.Body.Close()
-					break
-				}
-				s.Log.Error("Unable to sent event to endpoint", "err", err)
-			}
-
-			s.Offsets.Lock()
-			s.Offsets.Last[key] = msg.Offset + 1
-			s.Offsets.Unlock()
+			offsets[key] = 0
 		}
-
-		mx.Close()
 	}
+
+	return
 }
 
 func main() {
@@ -216,11 +90,11 @@ func main() {
 	cfg.SetDefaults()
 
 	if _, err := toml.DecodeFile(*config, &cfg); err != nil {
-		log.Fatal(err)
+		logrus.Fatal(err)
 	}
 
-	log.SetLevel(cfg.Logging.Level.Level)
-	log.SetFormatter(&log.TextFormatter{
+	logrus.SetLevel(cfg.Logging.Level.Level)
+	logrus.SetFormatter(&logrus.TextFormatter{
 		FullTimestamp:    cfg.Logging.FullTimestamp,
 		DisableTimestamp: cfg.Logging.DisableTimestamp,
 		DisableColors:    cfg.Logging.DisableColors,
@@ -229,49 +103,211 @@ func main() {
 
 	pidfile, err := OpenPidfile(cfg.Global.Pidfile)
 	if err != nil {
-		log.Fatal("Unable to open pidfile: ", err.Error())
+		logrus.Fatal("Unable to open pidfile: ", err.Error())
 	}
 	defer pidfile.Close()
 
 	if err := pidfile.Check(); err != nil {
-		log.Fatal("Check failed: ", err.Error())
+		logrus.Fatal("Check failed: ", err.Error())
 	}
 
 	if err := pidfile.Write(); err != nil {
-		log.Fatal("Unable to write pidfile: ", err.Error())
+		logrus.Fatalf("Unable to write pidfile: %+v", err.Error())
 	}
 
 	logfile, err := OpenLogfile(cfg.Global.Logfile)
 	if err != nil {
-		log.Fatal("Unable to open log: ", err.Error())
+		logrus.Fatalf("Unable to open log: %+v", err.Error())
 	}
 	defer logfile.Close()
-	log.SetOutput(logfile)
+	logrus.SetOutput(logfile)
 
-	if cfg.Global.GoMaxProcs == 0 {
-		cfg.Global.GoMaxProcs = runtime.NumCPU()
+	clientID := uuid.NewV4().String()
+
+	zki := ZkInitialize(&cfg.Zookeeper)
+	ZkRegister(zki, clientID)
+
+	brokerConf := kafka.NewBrokerConf("kafka-replicator")
+	brokerConf.DialTimeout = cfg.Kafka.DialTimeout.Duration
+	brokerConf.LeaderRetryLimit = cfg.Kafka.LeaderRetryLimit
+	brokerConf.LeaderRetryWait = cfg.Kafka.LeaderRetryWait.Duration
+
+	broker, err := kafka.Dial(cfg.Kafka.Brokers, brokerConf)
+	if err != nil {
+		logrus.Fatalf("Unable to connect to kafka: %+v", err)
 	}
-	runtime.GOMAXPROCS(cfg.Global.GoMaxProcs)
+	defer broker.Close()
 
-	statefile := NewState(cfg.State.File)
+	coordConf := kafka.NewOffsetCoordinatorConf("replicator-" + cfg.Zookeeper.Cluster)
+	coordinator, err := broker.OffsetCoordinator(coordConf)
 
-	server := &Server{
-		Cfg:     &cfg,
-		Log:     &serverLogger{
-			subsys: "server",
+	if err != nil {
+		logrus.Fatalf("Unable to create coordinator: %+v", err)
+	}
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // ignore expired SSL certificates
 		},
-		Offsets: statefile.Load(cfg.Kafka.Topics),
 	}
 
-	go func() {
-		for {
-			time.Sleep(cfg.State.Period.Duration)
+	offsets := OffsetInit(cfg.Kafka.Topics)
+	numOffsets := len(offsets)
 
-			server.Offsets.Lock()
-			statefile.Save(server.Offsets)
-			server.Offsets.Unlock()
+	numLocked := 0
+	numPartitions := 0
+	prevNodes := 0
+
+	var nodes []string
+	var partitions []string
+
+	if nodes, err = ZkNodes(zki); err != nil {
+		logrus.Fatalf("Unable to get nodes: %+v", err)
+	}
+	numNodes := len(nodes)
+
+	for {
+		if numNodes == 0 {
+			logrus.Fatal("Nodes not found")
 		}
-	}()
 
-	log.Fatal(server.run())
+		if partitions, err = ZkPartitions(zki); err != nil {
+			logrus.Fatalf("Unable to get partitions: %+v", err)
+		}
+
+		if prevNodes != numNodes || numOffsets != len(partitions) {
+			// FIXME numOffsets < numNodes
+			numPartitions = int(math.Ceil(float64(numOffsets) / float64(numNodes)))
+
+			if prevNodes < numNodes {
+				needUnlock := numLocked - numPartitions
+
+				for k, v := range offsets {
+					if needUnlock <= 0 {
+						break
+					}
+					if v == 0 {
+						continue
+					}
+					if err := ZkDeletePartition(zki, k.Topic, k.Partition); err != nil {
+						logrus.Fatalf("Unable to remove partition: %+v", err)
+					}
+					offsets[k] = 0
+
+					needUnlock--
+					numLocked--
+				}
+			}
+
+			for {
+				if partitions, err = ZkPartitions(zki); err != nil {
+					logrus.Fatalf("Unable to get partitions: %+v", err)
+				}
+
+				if numOffsets == len(partitions) || numLocked >= numPartitions {
+					break
+				}
+
+				for k, v := range offsets {
+					if v == 1 {
+						continue
+					}
+					err := ZkCreatePartition(zki, k.Topic, k.Partition)
+
+					if err != nil {
+						if err == zk.ErrNodeExists {
+							continue
+						}
+						logrus.Fatalf("Unable to create partition: %+v", err)
+					}
+
+					offsets[k] = 1
+					numLocked++
+				}
+			}
+			prevNodes = numNodes
+		}
+
+		var fetchers []kafka.Consumer
+
+		for k, v := range offsets {
+			if v == 0 {
+				continue
+			}
+
+			offset, _, err := coordinator.Offset(k.Topic, k.Partition)
+
+			if err == proto.ErrUnknownTopicOrPartition {
+				offset = kafka.StartOffsetNewest
+			} else {
+				offset++
+			}
+
+			conf := kafka.NewConsumerConf(k.Topic, k.Partition)
+
+			conf.RequestTimeout = cfg.Consumer.RequestTimeout.Duration
+			conf.RetryLimit = cfg.Consumer.RetryLimit
+			conf.RetryWait = cfg.Consumer.RetryWait.Duration
+			conf.RetryErrLimit = cfg.Consumer.RetryErrLimit
+			conf.RetryErrWait = cfg.Consumer.RetryErrWait.Duration
+			conf.MinFetchSize = cfg.Consumer.MinFetchSize
+			conf.MaxFetchSize = cfg.Consumer.MaxFetchSize
+			conf.StartOffset = offset
+
+			consumer, err := broker.Consumer(conf)
+			if err != nil {
+				logrus.Fatalf("Unable make consumer: %+v", err)
+			}
+
+			fetchers = append(fetchers, consumer)
+		}
+
+		mx := kafka.Merge(fetchers...)
+
+		for prevNodes == numNodes {
+			select {
+			case <-time.After(1 * time.Second):
+				if nodes, err = ZkNodes(zki); err != nil {
+					logrus.Fatalf("Unable to get nodes: %+v", err)
+				}
+				numNodes = len(nodes)
+				continue
+			default:
+			}
+
+			msg, err := mx.Consume()
+			if err != nil {
+				logrus.Errorf("Unable to consume: %+v", err)
+				break
+			}
+
+			logrus.NewEntry(logrus.StandardLogger()).
+				WithField("topic", msg.Topic).
+				WithField("partition", msg.Partition).
+				WithField("offset", msg.Offset).
+				Info("Received message")
+
+			var m kafkaMessage
+			if err = json.Unmarshal(msg.Value, &m); err != nil {
+				logrus.Errorf("Unable to parse message: %+v", err)
+				continue
+			}
+
+			endpointURL := cfg.Endpoint.URL + "?queue=" + msg.Topic
+			for {
+				resp, err := client.Post(endpointURL, "application/json", bytes.NewReader(m.Data))
+				if err == nil {
+					resp.Body.Close()
+					break
+				}
+				logrus.Errorf("Unable to sent event to endpoint: %+v", err)
+			}
+
+			if err := coordinator.Commit(msg.Topic, msg.Partition, msg.Offset); err != nil {
+				logrus.Fatalf("Unable to commit offset: %+v", err)
+			}
+		}
+
+		mx.Close()
+	}
 }

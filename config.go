@@ -8,18 +8,18 @@
 package main
 
 import (
-	log "github.com/Sirupsen/logrus"
+	"github.com/Sirupsen/logrus"
 
 	"strings"
 	"time"
 )
 
 type CfgLogLevel struct {
-	log.Level
+	logrus.Level
 }
 
 func (d *CfgLogLevel) UnmarshalText(data []byte) (err error) {
-	d.Level, err = log.ParseLevel(strings.ToLower(string(data)))
+	d.Level, err = logrus.ParseLevel(strings.ToLower(string(data)))
 	return
 }
 
@@ -36,9 +36,8 @@ func (d *CfgDuration) UnmarshalText(data []byte) (err error) {
 
 type ConfigGlobal struct {
 	Address string
-	Logfile    string
-	Pidfile    string
-	GoMaxProcs int
+	Logfile string
+	Pidfile string
 }
 
 type ConfigLogging struct {
@@ -55,6 +54,12 @@ type ConfigKafka struct {
 	DialTimeout      CfgDuration
 	LeaderRetryLimit int
 	LeaderRetryWait  CfgDuration
+}
+
+type ConfigZookeeper struct {
+	Cluster        string
+	SessionTimeout CfgDuration
+	Servers        []string
 }
 
 type ConfigConsumer struct {
@@ -79,17 +84,17 @@ type ConfigEndpoint struct {
 
 // Config is a main config structure
 type Config struct {
-	Global   ConfigGlobal
-	Logging  ConfigLogging
-	Kafka    ConfigKafka
-	State    ConfigState
-	Endpoint ConfigEndpoint
-	Consumer ConfigConsumer
+	Global    ConfigGlobal
+	Logging   ConfigLogging
+	Kafka     ConfigKafka
+	Zookeeper ConfigZookeeper
+	State     ConfigState
+	Endpoint  ConfigEndpoint
+	Consumer  ConfigConsumer
 }
 
 // SetDefaults applies default values to config structure.
 func (c *Config) SetDefaults() {
-	c.Global.GoMaxProcs = 0
 	c.Global.Logfile = "/var/log/kafka-replicator.log"
 	c.Global.Pidfile = "/run/kafka-replicator.pid"
 
@@ -100,6 +105,9 @@ func (c *Config) SetDefaults() {
 	c.Kafka.LeaderRetryLimit = 2
 	c.Kafka.LeaderRetryWait.Duration = 500 * time.Millisecond
 
+	c.Zookeeper.Cluster = "default"
+	c.Zookeeper.SessionTimeout.Duration = 1 * time.Second
+
 	c.Consumer.RequestTimeout.Duration = 50 * time.Millisecond
 	c.Consumer.RetryLimit = 2
 	c.Consumer.RetryWait.Duration = 50 * time.Millisecond
@@ -109,9 +117,9 @@ func (c *Config) SetDefaults() {
 	c.Consumer.MaxFetchSize = 4194304
 	c.Consumer.DefaultFetchSize = 524288
 
-	c.Logging.Level.Level = log.InfoLevel
+	c.Logging.Level.Level = logrus.InfoLevel
 	c.Logging.DisableColors = true
 	c.Logging.DisableTimestamp = false
 	c.Logging.FullTimestamp = true
-	c.Logging.DisableSorting = true
+	c.Logging.DisableSorting = false
 }
