@@ -42,6 +42,11 @@ type partitionKey struct {
 	Partition int32
 }
 
+type partitionStatus struct {
+	Locked bool
+	Offset int64
+}
+
 func toInt32(s string) int32 {
 	if s == "" {
 		return 0
@@ -53,8 +58,10 @@ func toInt32(s string) int32 {
 	return int32(i)
 }
 
-func OffsetInit(topics []string) (offsets map[partitionKey]int) {
-	offsets = make(map[partitionKey]int)
+type partitionInfo map[partitionKey]*partitionStatus
+
+func NewOffsets(topics []string) (offsets partitionInfo) {
+	offsets = make(partitionInfo)
 
 	for _, topic := range topics {
 		topicInfo := strings.SplitN(topic, ":", 2)
@@ -72,11 +79,69 @@ func OffsetInit(topics []string) (offsets map[partitionKey]int) {
 				Topic:     topicInfo[0],
 				Partition: i,
 			}
-			offsets[key] = 0
+			offsets[key] = &partitionStatus{
+				Locked: false,
+				Offset: 0,
+			}
 		}
 	}
 
 	return
+}
+
+func (offsets partitionInfo) GetCoordinatorOffsets(coordinator kafka.OffsetCoordinator) {
+	for k, v := range offsets {
+		if !v.Locked {
+			continue
+		}
+
+		offset, _, err := coordinator.Offset(k.Topic, k.Partition)
+
+		if err == proto.ErrUnknownTopicOrPartition {
+			offset = kafka.StartOffsetNewest
+		} else {
+			offset++
+		}
+
+		offsets[k].Offset = offset
+	}
+}
+
+func (offsets partitionInfo) GetEarliestOffsets(conn *kafka.Broker) {
+	var offset int64
+	var err error
+
+	for k, v := range offsets {
+		if !v.Locked {
+			continue
+		}
+
+		for {
+			offset, err = conn.OffsetEarliest(k.Topic, k.Partition)
+			if err == nil {
+				break
+			}
+			logrus.Errorf("Unable to obtain earliest offset (%s, %d): %+v", k.Topic, k.Partition, err)
+			time.Sleep(1 * time.Second)
+		}
+
+		if offsets[k].Offset >= 0 && offsets[k].Offset < offset {
+			offsets[k].Offset = offset
+		}
+	}
+}
+
+func (offsets partitionInfo) SetOffset(topic string, partition int32, offset int64) {
+	k := partitionKey{
+		Topic:     topic,
+		Partition: partition,
+	}
+
+	if offset < offsets[k].Offset {
+		logrus.Fatal("Try to update newer offset")
+	}
+
+	offsets[k].Offset = offset
 }
 
 func main() {
@@ -132,14 +197,20 @@ func main() {
 	brokerConf.LeaderRetryLimit = cfg.Kafka.LeaderRetryLimit
 	brokerConf.LeaderRetryWait = cfg.Kafka.LeaderRetryWait.Duration
 
-	broker, err := kafka.Dial(cfg.Kafka.Brokers, brokerConf)
-	if err != nil {
-		logrus.Fatalf("Unable to connect to kafka: %+v", err)
+	conns := make(map[string]*kafka.Broker)
+	conns["offsets"] = nil
+	conns["coordinator"] = nil
+
+	for k := range conns {
+		conns[k], err = kafka.Dial(cfg.Kafka.Brokers, brokerConf)
+		if err != nil {
+			logrus.Fatalf("Unable to connect to kafka: %+v", err)
+		}
+		defer conns[k].Close()
 	}
-	defer broker.Close()
 
 	coordConf := kafka.NewOffsetCoordinatorConf("replicator-" + cfg.Zookeeper.Cluster)
-	coordinator, err := broker.OffsetCoordinator(coordConf)
+	coordinator, err := conns["coordinator"].OffsetCoordinator(coordConf)
 
 	if err != nil {
 		logrus.Fatalf("Unable to create coordinator: %+v", err)
@@ -151,22 +222,23 @@ func main() {
 		},
 	}
 
-	offsets := OffsetInit(cfg.Kafka.Topics)
+	offsets := NewOffsets(cfg.Kafka.Topics)
 	numOffsets := len(offsets)
 
 	numLocked := 0
+	numNodes := 0
 	numPartitions := 0
 	prevNodes := 0
 
 	var nodes []string
 	var partitions []string
 
-	if nodes, err = ZkNodes(zki); err != nil {
-		logrus.Fatalf("Unable to get nodes: %+v", err)
-	}
-	numNodes := len(nodes)
-
 	for {
+		if nodes, err = ZkNodes(zki); err != nil {
+			logrus.Fatalf("Unable to get nodes: %+v", err)
+		}
+		numNodes = len(nodes)
+
 		if numNodes == 0 {
 			logrus.Fatal("Nodes not found")
 		}
@@ -186,13 +258,14 @@ func main() {
 					if needUnlock <= 0 {
 						break
 					}
-					if v == 0 {
+					if !v.Locked {
 						continue
 					}
 					if err := ZkDeletePartition(zki, k.Topic, k.Partition); err != nil {
 						logrus.Fatalf("Unable to remove partition: %+v", err)
 					}
-					offsets[k] = 0
+					offsets[k].Locked = false
+					offsets[k].Offset = 0
 
 					needUnlock--
 					numLocked--
@@ -209,10 +282,10 @@ func main() {
 				}
 
 				for k, v := range offsets {
-					if v == 1 {
+					if v.Locked {
 						continue
 					}
-					err := ZkCreatePartition(zki, k.Topic, k.Partition)
+					err := ZkCreatePartition(zki, k.Topic, k.Partition, clientID)
 
 					if err != nil {
 						if err == zk.ErrNodeExists {
@@ -221,29 +294,32 @@ func main() {
 						logrus.Fatalf("Unable to create partition: %+v", err)
 					}
 
-					offsets[k] = 1
+					offsets[k].Locked = true
 					numLocked++
 				}
 			}
+
+			offsets.GetCoordinatorOffsets(coordinator)
+
 			prevNodes = numNodes
+		}
+
+		logrus.Infof("numNodes=%d numPartitions=%d", numNodes, numPartitions)
+
+		conns["consumer"], err = kafka.Dial(cfg.Kafka.Brokers, brokerConf)
+		if err != nil {
+			logrus.Fatalf("Unable to connect to kafka: %+v", err)
 		}
 
 		var fetchers []kafka.Consumer
 
 		for k, v := range offsets {
-			if v == 0 {
+			if !v.Locked {
 				continue
 			}
 
-			offset, _, err := coordinator.Offset(k.Topic, k.Partition)
-
-			if err == proto.ErrUnknownTopicOrPartition {
-				offset = kafka.StartOffsetNewest
-			} else {
-				offset++
-			}
-
 			conf := kafka.NewConsumerConf(k.Topic, k.Partition)
+			conf.StartOffset = v.Offset
 
 			conf.RequestTimeout = cfg.Consumer.RequestTimeout.Duration
 			conf.RetryLimit = cfg.Consumer.RetryLimit
@@ -252,9 +328,8 @@ func main() {
 			conf.RetryErrWait = cfg.Consumer.RetryErrWait.Duration
 			conf.MinFetchSize = cfg.Consumer.MinFetchSize
 			conf.MaxFetchSize = cfg.Consumer.MaxFetchSize
-			conf.StartOffset = offset
 
-			consumer, err := broker.Consumer(conf)
+			consumer, err := conns["consumer"].Consumer(conf)
 			if err != nil {
 				logrus.Fatalf("Unable make consumer: %+v", err)
 			}
@@ -262,30 +337,57 @@ func main() {
 			fetchers = append(fetchers, consumer)
 		}
 
-		mx := kafka.Merge(fetchers...)
+		if len(fetchers) == 0 {
+			continue
+		}
 
-		for prevNodes == numNodes {
-			select {
-			case <-time.After(1 * time.Second):
+		mx := kafka.Merge(fetchers...)
+		delay := time.Now().Add(3 * time.Second)
+
+		for {
+			if time.Now().After(delay) {
 				if nodes, err = ZkNodes(zki); err != nil {
 					logrus.Fatalf("Unable to get nodes: %+v", err)
 				}
-				numNodes = len(nodes)
-				continue
-			default:
+
+				if prevNodes != len(nodes) {
+					break
+				}
+
+				delay = time.Now().Add(3 * time.Second)
 			}
 
-			msg, err := mx.Consume()
+			result := make(chan struct{})
+			timeout := make(chan struct{})
+
+			timer := time.AfterFunc(4 * time.Second, func() { close(timeout) })
+
+			var msg *proto.Message
+			var err error
+
+			go func() {
+				msg, err = mx.Consume()
+				close(result)
+			}()
+
+			select {
+			case <-result:
+			case <-timeout:
+				continue
+			}
+
+			timer.Stop()
+
 			if err != nil {
-				logrus.Errorf("Unable to consume: %+v", err)
+				if err == proto.ErrOffsetOutOfRange {
+					offsets.GetEarliestOffsets(conns["offsets"])
+					continue
+				}
+				if err != kafka.ErrMxClosed {
+					logrus.Errorf("Unable to consume: %+v", err)
+				}
 				break
 			}
-
-			logrus.NewEntry(logrus.StandardLogger()).
-				WithField("topic", msg.Topic).
-				WithField("partition", msg.Partition).
-				WithField("offset", msg.Offset).
-				Info("Received message")
 
 			var m kafkaMessage
 			if err = json.Unmarshal(msg.Value, &m); err != nil {
@@ -306,8 +408,17 @@ func main() {
 			if err := coordinator.Commit(msg.Topic, msg.Partition, msg.Offset); err != nil {
 				logrus.Fatalf("Unable to commit offset: %+v", err)
 			}
+
+			offsets.SetOffset(msg.Topic, msg.Partition, msg.Offset)
+
+			logrus.NewEntry(logrus.StandardLogger()).
+				WithField("topic", msg.Topic).
+				WithField("partition", msg.Partition).
+				WithField("offset", msg.Offset).
+				Info("Received message")
 		}
 
 		mx.Close()
+		conns["consumer"].Close()
 	}
 }

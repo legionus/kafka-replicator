@@ -12,6 +12,7 @@ import (
 	"github.com/samuel/go-zookeeper/zk"
 
 	"fmt"
+	"os"
 )
 
 type Zk struct {
@@ -62,7 +63,13 @@ func ZkCreateEphemeral(conn *zk.Conn, path string, data string) error {
 
 func ZkRegister(zki *Zk, clientID string) {
 	logrus.Info("ClientID " + clientID)
-	if err := ZkCreateEphemeral(zki.Conn, zki.NodesPath+"/"+clientID, ""); err != nil {
+
+	name, err := os.Hostname()
+	if err != nil {
+		logrus.Fatal(err)
+	}
+
+	if err := ZkCreateEphemeral(zki.Conn, zki.NodesPath+"/"+clientID, name); err != nil {
 		logrus.Fatal(err)
 	}
 }
@@ -77,9 +84,9 @@ func ZkPartitions(zki *Zk) ([]string, error) {
 	return children, err
 }
 
-func ZkCreatePartition(zki *Zk, topic string, partition int32) error {
+func ZkCreatePartition(zki *Zk, topic string, partition int32, data string) error {
 	path := fmt.Sprintf("%s/%s-%d", zki.PartitionsPath, topic, partition)
-	return ZkCreateEphemeral(zki.Conn, path, "")
+	return ZkCreateEphemeral(zki.Conn, path, data)
 }
 
 func ZkDeletePartition(zki *Zk, topic string, partition int32) error {
