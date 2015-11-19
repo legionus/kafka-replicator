@@ -1,3 +1,10 @@
+kafka-replicator (300) unstable; urgency=low
+
+  * Fix kafka connections.
+  * Add timeouts.
+
+ -- Gladkov Alexey <gladkov.alexey@gmail.com>  Thu, 19 Nov 2015 15:59:41 +0300
+
 kafka-replicator (210) unstable; urgency=low
 
   * Remove obsolete config options.
