@@ -409,7 +409,7 @@ func main() {
 				logrus.Fatalf("Unable to commit offset: %+v", err)
 			}
 
-			offsets.SetOffset(msg.Topic, msg.Partition, msg.Offset)
+			offsets.SetOffset(msg.Topic, msg.Partition, msg.Offset+1)
 
 			logrus.NewEntry(logrus.StandardLogger()).
 				WithField("topic", msg.Topic).
